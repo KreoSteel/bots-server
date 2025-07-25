@@ -170,4 +170,15 @@ bot.on('interactionCreate', async (interaction) => {
     const approvalRow = new ActionRowBuilder<typeof ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
-          .setCustomId(`
+          .setCustomId('approve_entry')
+          .setLabel('Approve Entry')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('reject_entry')
+          .setLabel('Reject Entry')
+          .setStyle(ButtonStyle.Danger)
+      );
+
+    await interaction.followUp({ content: `Ticket created: ${ticketChannel}`, components: [approvalRow] });
+  }
+});
