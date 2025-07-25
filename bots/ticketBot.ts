@@ -123,7 +123,7 @@ bot.on('interactionCreate', async (interaction) => {
         staffId: null,
       });
 
-      const controlRow = new ActionRowBuilder<ButtonBuilder>()
+      const controlRow = new ActionRowBuilder<typeof ButtonBuilder>()
         .addComponents(
           new ButtonBuilder()
             .setCustomId(`take_request_${interaction.user.id}`)
@@ -178,7 +178,7 @@ bot.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: '🎯 You claimed this request!', ephemeral: true });
 
       // Disable the button
-      const newRow = new ActionRowBuilder<ButtonBuilder>()
+      const newRow = new ActionRowBuilder<typeof ButtonBuilder>()
         .addComponents(
           new ButtonBuilder()
             .setCustomId(`take_request_${creatorId}`)
@@ -209,7 +209,7 @@ bot.on('interactionCreate', async (interaction) => {
       }
 
       // Show rating system
-      const ratingRow = new ActionRowBuilder<ButtonBuilder>();
+      const ratingRow = new ActionRowBuilder<typeof ButtonBuilder>();
       for (let i = 1; i <= 5; i++) {
         ratingRow.addComponents(
           new ButtonBuilder()

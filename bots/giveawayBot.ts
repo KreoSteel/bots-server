@@ -105,7 +105,7 @@ bot.on('messageCreate', async (message) => {
       .setFooter({ text: `Ends at ${endTime.toLocaleString()}` })
       .setColor(0x3498db);
 
-    const row = new ActionRowBuilder<ButtonBuilder>()
+    const row = new ActionRowBuilder<typeof ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
           .setCustomId('join_casual')
@@ -167,107 +167,7 @@ bot.on('interactionCreate', async (interaction) => {
 
     await interaction.reply({ content: `📩 A ticket was created: ${ticketChannel}`, ephemeral: true });
 
-    const approvalRow = new ActionRowBuilder<ButtonBuilder>()
+    const approvalRow = new ActionRowBuilder<typeof ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
-          .setCustomId(`approve_${messageId}_${user.id}_${ticketChannel?.id}`)
-          .setLabel('Approve')
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`decline_${user.id}_${ticketChannel?.id}`)
-          .setLabel('Decline')
-          .setStyle(ButtonStyle.Danger)
-      );
-
-    await ticketChannel?.send({
-      content: `Staff, please review the premium entry by ${user}.`,
-      components: [approvalRow],
-    });
-  }
-
-  if (customId.startsWith('approve_')) {
-    const parts = customId.split('_');
-    const giveawayId = parts[1];
-    const userId = parts[2];
-    const channelId = parts[3];
-
-    const giveaway = giveawayData.get(giveawayId);
-    if (giveaway) {
-      giveaway.premiumEntries.push(userId);
-      await interaction.reply({ content: `✅ Approved <@${userId}>` });
-    }
-
-    const channel = guild?.channels.cache.get(channelId);
-    await channel?.delete();
-  }
-
-  if (customId.startsWith('decline_')) {
-    const parts = customId.split('_');
-    const userId = parts[1];
-    const channelId = parts[2];
-
-    await interaction.reply({ content: `❌ Declined <@${userId}>` });
-
-    const channel = guild?.channels.cache.get(channelId);
-    await channel?.delete();
-  }
-});
-
-async function checkGiveaways() {
-  const now = new Date();
-  const expired = [];
-
-  for (const [messageId, data] of giveawayData) {
-    if (data.endTime <= now) {
-      expired.push(messageId);
-
-      const allEntries = [...data.casualEntries, ...data.premiumEntries];
-      if (allEntries.length === 0) {
-        await data.message.channel.send('🎁 Giveaway ended. No valid entries.');
-        continue;
-      }
-
-      const winners = [];
-      const numWinners = Math.min(allEntries.length, data.winners);
-      
-      for (let i = 0; i < numWinners; i++) {
-        const randomIndex = Math.floor(Math.random() * allEntries.length);
-        winners.push(allEntries.splice(randomIndex, 1)[0]);
-      }
-
-      const winnerMentions = winners.map(id => `<@${id}>`).join(', ');
-      await data.message.channel.send(`🎉 Giveaway Over!\n**${data.headline}**\nWinners: ${winnerMentions}`);
-    }
-  }
-
-  expired.forEach(id => giveawayData.delete(id));
-}
-
-function parseDuration(duration: string): number {
-  const match = duration.match(/^(\d+)([hm])$/);
-  if (!match) return 3600000; // Default 1 hour
-
-  const value = parseInt(match[1]);
-  const unit = match[2];
-
-  return unit === 'h' ? value * 3600000 : value * 60000;
-}
-
-bot.on('error', (error) => {
-  logger.error('Giveaway & Levels Bot error:', error);
-});
-
-bot.on('disconnect', () => {
-  logger.warn('Giveaway & Levels Bot disconnected');
-});
-
-const token = process.env.BOT_TOKEN || process.env.GIVEAWAY_BOT_TOKEN;
-if (!token) {
-  logger.error('No bot token provided for Giveaway & Levels Bot');
-  process.exit(1);
-}
-
-bot.login(token).catch((error) => {
-  logger.error('Failed to login Giveaway & Levels Bot:', error);
-  process.exit(1);
-});
+          .setCustomId(`

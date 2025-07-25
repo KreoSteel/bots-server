@@ -4,7 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
 import { botManager } from "./services/botManager";
 import { logger } from "./services/logger";
-import { insertBotSchema, insertLogSchema, type WebSocketMessage } from "@shared/schema";
+import { insertBotSchema, insertLogSchema, type WebSocketMessage } from "./shared/schema";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);

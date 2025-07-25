@@ -1,4 +1,4 @@
-import { users, bots, logs, systemHealth, type User, type InsertUser, type Bot, type InsertBot, type Log, type InsertLog, type SystemHealth, type InsertSystemHealth } from "@shared/schema";
+import { users, bots, logs, systemHealth, type User, type InsertUser, type Bot, type InsertBot, type Log, type InsertLog, type SystemHealth, type InsertSystemHealth } from "./shared/schema";
 
 export interface IStorage {
   // User methods

@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from "child_process";
 import { storage } from "../storage";
 import { logger } from "./logger";
 import path from "path";
-import { type WebSocketMessage, type Bot } from "@shared/schema";
+import { type WebSocketMessage, type Bot } from "./shared/schema";
 
 interface BotProcess {
   process: ChildProcess;

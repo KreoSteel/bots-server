@@ -72,7 +72,7 @@ bot.on('interactionCreate', async (interaction) => {
 
       await channel?.send(`${user}\n${form_message}`);
 
-      const row = new ActionRowBuilder<ButtonBuilder>()
+      const row = new ActionRowBuilder<typeof ButtonBuilder>()
         .addComponents(
           new ButtonBuilder()
             .setCustomId(`accept_${appType}_${user.id}`)
@@ -154,7 +154,7 @@ bot.on('messageCreate', async (message) => {
   const command = args.shift()?.toLowerCase();
 
   if (command === 'application') {
-    const row = new ActionRowBuilder<ButtonBuilder>()
+    const row = new ActionRowBuilder<typeof ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
           .setCustomId('apply_astdx')
@@ -197,7 +197,7 @@ bot.on('messageCreate', async (message) => {
       )
       .setColor(0x0099ff);
 
-    const nextButton = new ActionRowBuilder<ButtonBuilder>()
+    const nextButton = new ActionRowBuilder<typeof ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
           .setCustomId(`rules_next_${message.author.id}`)
@@ -242,7 +242,7 @@ bot.on('interactionCreate', async (interaction) => {
         )
         .setColor(0xff0000);
 
-      const backButton = new ActionRowBuilder<ButtonBuilder>()
+      const backButton = new ActionRowBuilder<typeof ButtonBuilder>()
         .addComponents(
           new ButtonBuilder()
             .setCustomId(`rules_next_${userId}`)
@@ -288,7 +288,7 @@ bot.on('interactionCreate', async (interaction) => {
       )
       .setColor(0x0099ff);
 
-    const nextButton = new ActionRowBuilder<ButtonBuilder>()
+    const nextButton = new ActionRowBuilder<typeof ButtonBuilder>()
       .addComponents(
         new ButtonBuilder()
           .setCustomId(`rules_next_${userId}`)
