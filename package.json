@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "ts-node index.ts",
+    "start": "node dist/index.js",
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -21,7 +21,20 @@
   },
   "homepage": "https://github.com/KreoSteel/bots-server#readme",
   "dependencies": {
+    "@replit/vite-plugin-cartographer": "^0.2.7",
+    "@replit/vite-plugin-runtime-error-modal": "^0.0.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "discord.js": "^14.21.0",
+    "express": "^5.1.0",
+    "nanoid": "^5.1.5",
     "ts-node": "^10.9.2",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vite": "^7.0.6",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.1.0",
+    "@types/ws": "^8.18.1"
   }
 }
