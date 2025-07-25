@@ -149,4 +149,3 @@ async def lb(ctx):
 
 
 bot.invites = {}
-bot.run("MTM5NjE1MzY3ODYwMzM1ODI4OA.GGv8Mt.fJAEV4Sdp2XRmp0nA_PBT2rIJVJh1wiwtEd2oo")

@@ -233,4 +233,3 @@ async def rules(ctx):
 async def application(ctx):
     await ctx.send("Click a button below to apply:", 
 view=ApplicationView())
-bot.run("MTM5NjQ5ODk2Mjg2OTEyOTM5Nw.GZpaeH.lEGyvWHhO1jpnF-mlErm07iZvBKVsFOpPyV2NY")

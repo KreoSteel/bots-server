@@ -1,5 +1,7 @@
 import threading
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 # ================== Application Bot ==================
 import discord as discord_app

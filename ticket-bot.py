@@ -217,4 +217,3 @@ async def staffratings(ctx):
 
 
 
-bot.run("MTM5NjUyMzYzMDQ5MzQzNDA2Nw.G7QjtM.SqLLyKQgUqVqjE65gJcpAhf3XGKrQnw-TsS890")

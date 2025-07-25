@@ -182,5 +182,3 @@ async def countdown_timer():
         del giveaway_data[gid]
 
 
-# ===== BOT START =====
-bot.run("MTM5NTg3Mzg3NTUyNjQyMjcxOQ.G2jPo4.iGeuiQAPyCCK-kHQyGDwVFu1vceowmoSOp6Tvc")
