@@ -37,7 +37,7 @@ bot.once('ready', () => {
   logger.info(`Application Bot logged in as ${bot.user?.tag}`);
 });
 
-bot.on('interactionCreate', async (interaction) => {
+bot.on('interactionCreate', async (interaction: discord.Interaction) => {
   if (!interaction.isButton()) return;
 
   const { customId, user, guild } = interaction;
@@ -89,7 +89,7 @@ bot.on('interactionCreate', async (interaction) => {
         );
 
       await channel?.send({ content: 'Staff controls:', components: [row] });
-    } catch (error) {
+    } catch (error: any) {
       logger.error('Error creating application channel:', error);
       await interaction.reply({ content: 'Failed to create application channel.', ephemeral: true });
     }
@@ -119,7 +119,7 @@ bot.on('interactionCreate', async (interaction) => {
       }
 
       await interaction.reply({ content: `✅ ${member} has been accepted and given roles.`, ephemeral: true });
-    } catch (error) {
+    } catch (error: any) {
       logger.error('Error adding roles:', error);
     }
   }
@@ -138,7 +138,7 @@ bot.on('interactionCreate', async (interaction) => {
     setTimeout(async () => {
       try {
         await channel?.delete();
-      } catch (error) {
+      } catch (error: any) {
         logger.error('Error deleting channel:', error);
       }
     }, 5000);
@@ -146,7 +146,7 @@ bot.on('interactionCreate', async (interaction) => {
 });
 
 // Application command
-bot.on('messageCreate', async (message) => {
+bot.on('messageCreate', async (message: discord.Message) => {
   if (message.author.bot) return;
   if (!message.content.startsWith('app!')) return;
 
@@ -215,7 +215,7 @@ bot.on('messageCreate', async (message) => {
 });
 
 // Handle rules pagination
-bot.on('interactionCreate', async (interaction) => {
+bot.on('interactionCreate', async (interaction: discord.Interaction) => {
   if (!interaction.isButton()) return;
 
   const { customId, user } = interaction;
@@ -305,7 +305,7 @@ bot.on('interactionCreate', async (interaction) => {
   }
 });
 
-bot.on('error', (error) => {
+bot.on('error', (error: any) => {
   logger.error('Application Bot error:', error);
 });
 
@@ -319,7 +319,7 @@ if (!token) {
   process.exit(1);
 }
 
-bot.login(token).catch((error) => {
+bot.login(token).catch((error: any) => {
   logger.error('Failed to login Application Bot:', error);
   process.exit(1);
 });

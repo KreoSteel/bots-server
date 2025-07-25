@@ -182,3 +182,9 @@ bot.on('interactionCreate', async (interaction) => {
     await interaction.followUp({ content: `Ticket created: ${ticketChannel}`, components: [approvalRow] });
   }
 });
+
+async function checkGiveaways() {}
+function parseDuration(duration: string): number { return 0; }
+async function someHandler(message: any) {}
+async function someInteractionHandler(interaction: any) {}
+function errorHandler(error: any) {}
