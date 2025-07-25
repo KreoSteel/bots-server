@@ -9,8 +9,54 @@ from discord.ext import commands as commands_app
 from discord.ui import Button as Button_app, View as View_app
 import asyncio as asyncio_app
 
+import sqlite3
+# --- SQLite setup for Application Bot ---
+app_db_lock = threading.Lock()
+app_db = sqlite3.connect('applicationbot.db', check_same_thread=False)
+app_db.row_factory = sqlite3.Row
+app_cursor = app_db.cursor()
+app_cursor.execute('''
+CREATE TABLE IF NOT EXISTS app_counter (
+    app_type TEXT PRIMARY KEY,
+    counter INTEGER NOT NULL
+)
+''')
+app_cursor.execute('''
+CREATE TABLE IF NOT EXISTS applications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    app_type TEXT NOT NULL,
+    channel_id INTEGER NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+''')
+# Initialize counters if not present
+for t in ("astdx", "als", "all"):
+    if not app_cursor.execute('SELECT 1 FROM app_counter WHERE app_type = ?', (t,)).fetchone():
+        app_cursor.execute('INSERT INTO app_counter (app_type, counter) VALUES (?, ?)', (t, 1))
+app_db.commit()
+
+def get_app_counter(app_type):
+    with app_db_lock:
+        row = app_cursor.execute('SELECT counter FROM app_counter WHERE app_type = ?', (app_type,)).fetchone()
+        return row['counter'] if row else 1
+
+def increment_app_counter(app_type):
+    with app_db_lock:
+        c = get_app_counter(app_type)
+        app_cursor.execute('UPDATE app_counter SET counter = ? WHERE app_type = ?', (c+1, app_type))
+        app_db.commit()
+        return c
+
+def log_application(user_id, app_type, channel_id):
+    with app_db_lock:
+        app_cursor.execute('INSERT INTO applications (user_id, app_type, channel_id) VALUES (?, ?, ?)', (user_id, app_type, channel_id))
+        app_db.commit()
+
 intents_app = discord_app.Intents.all()
 bot_app = commands_app.Bot(command_prefix="app!", intents=intents_app)
+
+bot_app.remove_command('help')
 
 ASTDX_ROLE_ID = 1382679356975087647
 ALS_ROLE_ID = 1397023739631108188
@@ -40,6 +86,7 @@ class ApplicationView(View_app):
         self.add_item(ApplicationButton("Apply on ALS", "als"))
         self.add_item(ApplicationButton("Apply All", "all"))
 
+# Refactor ApplicationButton to use SQLite for counter and log applications
 class ApplicationButton(Button_app):
     def __init__(self, label, app_type):
         super().__init__(label=label, style=discord_app.ButtonStyle.primary)
@@ -49,8 +96,7 @@ class ApplicationButton(Button_app):
         user = interaction.user
         guild = interaction.guild
         category = guild.get_channel(CATEGORY_ID)
-        number = application_counter[self.app_type]
-        application_counter[self.app_type] += 1
+        number = increment_app_counter(self.app_type)
         channel_name = f"{self.app_type}-application-#{number:04}"
         overwrites = {
             guild.default_role: discord_app.PermissionOverwrite(read_messages=False),
@@ -61,6 +107,7 @@ class ApplicationButton(Button_app):
             category=category,
             overwrites=overwrites
         )
+        log_application(user.id, self.app_type, channel.id)
         await interaction.response.send_message(f"\u2705 Application created: {channel.mention}", ephemeral=True)
         await channel.send(f"{user.mention}\n{form_message}")
         view = View_app()
@@ -103,7 +150,25 @@ class DeleteTicketButton(Button_app):
     async def callback(self, interaction: discord_app.Interaction):
         await interaction.response.send_message("This ticket will be deleted in 5 seconds...", ephemeral=True)
         await asyncio_app.sleep(5)
-        await self.channel.delete()
+        ticket_data = get_ticket(interaction.channel.id)
+        if not ticket_data:
+            await interaction.response.send_message("\u274c This ticket does not exist or is already closed.", ephemeral=True)
+            return
+        if interaction.user.id != ticket_data['creator_id']:
+            await interaction.response.send_message("\u274c Only the ticket creator can delete this ticket.", ephemeral=True)
+            return
+        delete_ticket(interaction.channel.id)
+        await interaction.response.send_message("\ud83d\uddd1\ufe0f Ticket deleted.", ephemeral=True)
+        await interaction.channel.delete()
+        staff_id = ticket_data['staff_id']
+        if staff_id:
+            staff_member = interaction.guild.get_member(staff_id)
+            if staff_member:
+                view = VouchView([staff_member], interaction.user.id)
+                try:
+                    await interaction.user.send("Would you like to vouch for the staff who helped you?", view=view)
+                except Exception:
+                    pass  # User may have DMs closed
 
 class RulesView(View_app):
     def __init__(self, author: discord_app.Member):
@@ -192,6 +257,14 @@ async def rules(ctx):
 async def application(ctx):
     await ctx.send("Click a button below to apply:", view=ApplicationView())
 
+# --- Application Bot Help Command ---
+@bot_app.command()
+async def help(ctx):
+    embed = discord_app.Embed(title="Application Bot Commands", color=discord_app.Color.green())
+    embed.add_field(name="!rules", value="Show the server rules.", inline=False)
+    embed.add_field(name="!application", value="Start an application process.", inline=False)
+    await ctx.send(embed=embed)
+
 def run_application_bot():
     bot_app.run(os.environ["APP_BOT_TOKEN"])
 
@@ -202,38 +275,78 @@ import asyncio as asyncio_give
 import random as random_give
 from datetime import datetime as datetime_give, timedelta as timedelta_give
 
+import sqlite3
+# --- SQLite setup for Level Bot ---
+level_db_lock = threading.Lock()
+
+# Update SQLite connection for thread safety
+level_db = sqlite3.connect('levelbot.db', check_same_thread=False)
+level_db.row_factory = sqlite3.Row
+level_cursor = level_db.cursor()
+level_cursor.execute('''
+CREATE TABLE IF NOT EXISTS user_exp (
+    user_id INTEGER PRIMARY KEY,
+    exp INTEGER NOT NULL,
+    level INTEGER NOT NULL
+)
+''')
+level_db.commit()
+
 intents_give = discord_give.Intents.default()
 intents_give.message_content = True
 intents_give.members = True
 bot_give = commands_give.Bot(command_prefix='mul!', intents=intents_give)
-user_exp = {}
+
+bot_give.remove_command('help')
+
+# --- SQLite helper functions for user EXP/level ---
+def get_user_exp(user_id):
+    with level_db_lock:
+        row = level_cursor.execute('SELECT exp, level FROM user_exp WHERE user_id = ?', (user_id,)).fetchone()
+        if row:
+            return {'exp': row['exp'], 'level': row['level']}
+        else:
+            return {'exp': 0, 'level': 1}
+
+def set_user_exp(user_id, exp, level):
+    with level_db_lock:
+        if level_cursor.execute('SELECT 1 FROM user_exp WHERE user_id = ?', (user_id,)).fetchone():
+            level_cursor.execute('UPDATE user_exp SET exp = ?, level = ? WHERE user_id = ?', (exp, level, user_id))
+        else:
+            level_cursor.execute('INSERT INTO user_exp (user_id, exp, level) VALUES (?, ?, ?)', (user_id, exp, level))
+        level_db.commit()
+
 def get_required_exp(level):
     return 3 * (2 ** (level - 1))
+
 @bot_give.event
 async def on_message(message):
     if message.author.bot:
         return
     user_id = message.author.id
-    if user_id not in user_exp:
-        user_exp[user_id] = {'exp': 0, 'level': 1}
-    user_data = user_exp[user_id]
+    user_data = get_user_exp(user_id)
     user_data['exp'] += 1
+    leveled_up = False
     while user_data['exp'] >= get_required_exp(user_data['level']):
         user_data['exp'] -= get_required_exp(user_data['level'])
         user_data['level'] += 1
+        leveled_up = True
+    set_user_exp(user_id, user_data['exp'], user_data['level'])
+    if leveled_up:
         await message.channel.send(f"\ud83c\udf89 {message.author.mention} leveled up to level {user_data['level']}!")
     await bot_give.process_commands(message)
 @bot_give.command(name='check')
 async def check_level(ctx):
-    user = user_exp.get(ctx.author.id, {'exp': 0, 'level': 1})
+    user = get_user_exp(ctx.author.id)
     await ctx.send(f"{ctx.author.mention}, Level: {user['level']}, EXP: {user['exp']} / {get_required_exp(user['level'])}")
 @bot_give.command(name='lb')
 async def leaderboard(ctx):
-    sorted_users = sorted(user_exp.items(), key=lambda x: (x[1]['level'], x[1]['exp']), reverse=True)
+    with level_db_lock:
+        sorted_users = level_cursor.execute('SELECT user_id, exp, level FROM user_exp ORDER BY level DESC, exp DESC LIMIT 10').fetchall()
     desc = ""
-    for i, (uid, data) in enumerate(sorted_users[:10]):
-        user = await bot_give.fetch_user(uid)
-        desc += f"**{i+1}. {user.name}** - Level {data['level']} ({data['exp']} EXP)\n"
+    for i, row in enumerate(sorted_users):
+        user = await bot_give.fetch_user(row['user_id'])
+        desc += f"**{i+1}. {user.name}** - Level {row['level']} ({row['exp']} EXP)\n"
     embed = discord_give.Embed(title="\ud83d\udcca Leaderboard", description=desc, color=0x00ff00)
     await ctx.send(embed=embed)
 giveaway_data = {}
@@ -327,100 +440,89 @@ async def countdown_timer():
 def run_giveaway_bot():
     bot_give.run(os.environ["GIVEAWAY_BOT_TOKEN"])
 
+# --- Giveaway Levels Bot Help Command ---
+@bot_give.command(name="help")
+async def help_give(ctx):
+    embed = discord_give.Embed(title="Giveaway Levels Bot Commands", color=discord_give.Color.green())
+    embed.add_field(name="mul!check", value="Check your level and EXP.", inline=False)
+    embed.add_field(name="mul!lb", value="Show the leaderboard.", inline=False)
+    embed.add_field(name="mul!giveaways <headline> <winners> <duration>", value="Start a giveaway (admin only).", inline=False)
+    await ctx.send(embed=embed)
+
 # ================== Invites Tracker Bot ==================
 import discord as discord_inv
 from discord.ext import commands as commands_inv
 import json as json_inv
 import os as os_inv
+# --- SQLite setup for Invites Bot ---
+invites_db_lock = threading.Lock()
+invites_db = sqlite3.connect('invites.db', check_same_thread=False)
+invites_db.row_factory = sqlite3.Row
+invites_cursor = invites_db.cursor()
+invites_cursor.execute('''
+CREATE TABLE IF NOT EXISTS invites (
+    user_id INTEGER PRIMARY KEY,
+    points INTEGER NOT NULL
+)
+''')
+invites_db.commit()
+
+def get_invite_points(user_id):
+    with invites_db_lock:
+        row = invites_cursor.execute('SELECT points FROM invites WHERE user_id = ?', (user_id,)).fetchone()
+        return row['points'] if row else 0
+
+def set_invite_points(user_id, points):
+    with invites_db_lock:
+        if invites_cursor.execute('SELECT 1 FROM invites WHERE user_id = ?', (user_id,)).fetchone():
+            invites_cursor.execute('UPDATE invites SET points = ? WHERE user_id = ?', (points, user_id))
+        else:
+            invites_cursor.execute('INSERT INTO invites (user_id, points) VALUES (?, ?)', (user_id, points))
+        invites_db.commit()
+
+def add_invite_points(user_id, points):
+    current = get_invite_points(user_id)
+    set_invite_points(user_id, current + points)
+
+def remove_invite_points(user_id, points):
+    current = get_invite_points(user_id)
+    set_invite_points(user_id, max(0, current - points))
+
 intents_inv = discord_inv.Intents.all()
 bot_inv = commands_inv.Bot(command_prefix='inv!', intents=intents_inv)
 data_file = 'invites.json'
 if not os_inv.path.exists(data_file):
     with open(data_file, 'w') as f:
         json_inv.dump({}, f)
-@bot_inv.event
-async def on_ready():
-    print(f'\u2705 Logged in as {bot_inv.user}')
-    for guild in bot_inv.guilds:
-        invites = await guild.invites()
-        bot_inv.invites[guild.id] = {invite.code: invite.uses for invite in invites}
-@bot_inv.event
-async def on_guild_join(guild):
-    invites = await guild.invites()
-    bot_inv.invites[guild.id] = {invite.code: invite.uses for invite in invites}
-@bot_inv.event
-async def on_member_join(member):
-    with open(data_file, 'r') as f:
-        data = json_inv.load(f)
-    invites_before = bot_inv.invites.get(member.guild.id, {})
-    invites_after = await member.guild.invites()
-    used_invite = None
-    for invite in invites_after:
-        if invite.code in invites_before and invite.uses > invites_before[invite.code]:
-            used_invite = invite
-            break
-    if used_invite:
-        inviter = used_invite.inviter
-        inviter_id = str(inviter.id)
-        if inviter_id not in data:
-            data[inviter_id] = 0
-        data[inviter_id] += 1
-        with open(data_file, 'w') as f:
-            json_inv.dump(data, f)
-        print(f"{member.name} was invited by {inviter.name}")
-    bot_inv.invites[member.guild.id] = {invite.code: invite.uses for invite in invites_after}
-@bot_inv.event
-async def on_member_remove(member):
-    with open(data_file, 'r') as f:
-        data = json_inv.load(f)
-    invites_before = bot_inv.invites.get(member.guild.id, {})
-    invites_after = await member.guild.invites()
-    used_invite = None
-    for invite in invites_after:
-        if invite.code in invites_before and invite.uses < invites_before[invite.code]:
-            used_invite = invite
-            break
-    if used_invite:
-        inviter = used_invite.inviter
-        inviter_id = str(inviter.id)
-        if inviter_id in data:
-            data[inviter_id] = max(0, data[inviter_id] - 1)
-            with open(data_file, 'w') as f:
-                json_inv.dump(data, f)
-    bot_inv.invites[member.guild.id] = {invite.code: invite.uses for invite in invites_after}
+bot_inv.remove_command('help')
+
 @bot_inv.command()
 async def add(ctx, member: discord_inv.Member, points: int):
-    with open(data_file, 'r') as f:
-        data = json_inv.load(f)
-    user_id = str(member.id)
-    if user_id not in data:
-        data[user_id] = 0
-    data[user_id] += points
-    with open(data_file, 'w') as f:
-        json_inv.dump(data, f)
-    await ctx.send(f"\u2705 Added {points} points to {member.display_name}.")
+    add_invite_points(member.id, points)
+    await ctx.send(f"✅ Added {points} points to {member.display_name}.")
+
 @bot_inv.command()
 async def remove(ctx, member: discord_inv.Member, points: int):
-    with open(data_file, 'r') as f:
-        data = json_inv.load(f)
-    user_id = str(member.id)
-    if user_id not in data:
-        data[user_id] = 0
-    data[user_id] = max(0, data[user_id] - points)
-    with open(data_file, 'w') as f:
-        json_inv.dump(data, f)
-    await ctx.send(f"\u274c Removed {points} points from {member.display_name}.")
+    remove_invite_points(member.id, points)
+    await ctx.send(f"❌ Removed {points} points from {member.display_name}.")
+
 @bot_inv.command()
 async def lb(ctx):
-    with open(data_file, 'r') as f:
-        data = json_inv.load(f)
-    sorted_data = sorted(data.items(), key=lambda x: x[1], reverse=True)
-    leaderboard = ""
-    for i, (user_id, points) in enumerate(sorted_data[:10], start=1):
-        user = await bot_inv.fetch_user(int(user_id))
-        leaderboard += f"**{i}.** {user.name} - **{points} invites**\n"
-    await ctx.send(embed=discord_inv.Embed(title="\ud83c\udfc6 Invite Leaderboard", description=leaderboard, color=0x00ff00))
-bot_inv.invites = {}
+    with invites_db_lock:
+        rows = invites_cursor.execute('SELECT user_id, points FROM invites ORDER BY points DESC LIMIT 10').fetchall()
+    if not rows:
+        await ctx.send(embed=discord_inv.Embed(title="🏆 Invite Leaderboard", description="No invites yet!", color=0x00ff00))
+        return
+    desc = ""
+    medals = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
+    for i, row in enumerate(rows, start=1):
+        user = await bot_inv.fetch_user(row['user_id'])
+        medal = medals[i-1] if i <= len(medals) else "🏅"
+        desc += f"{medal} **{user.display_name}** — `{row['points']} invites`\n"
+    embed = discord_inv.Embed(title="🏆 Invite Leaderboard", description=desc, color=discord_inv.Color.gold())
+    embed.set_footer(text="Top inviters this week!")
+    await ctx.send(embed=embed)
+
 def run_invites_bot():
     bot_inv.run(os.environ["INVITES_BOT_TOKEN"])
 
@@ -429,10 +531,94 @@ import discord as discord_ticket
 from discord.ext import commands as commands_ticket
 from discord.ui import View as View_ticket, Button as Button_ticket, Select as Select_ticket
 from collections import defaultdict as defaultdict_ticket
+import sqlite3
+# --- SQLite setup for Ticket Bot ---
+ticket_db_lock = threading.Lock()
+ticket_db = sqlite3.connect('tickets.db', check_same_thread=False)
+ticket_db.row_factory = sqlite3.Row
+ticket_cursor = ticket_db.cursor()
+ticket_cursor.execute('''
+CREATE TABLE IF NOT EXISTS tickets (
+    ticket_id INTEGER PRIMARY KEY,
+    creator_id INTEGER NOT NULL,
+    staff_id INTEGER,
+    status TEXT NOT NULL
+)
+''')
+ticket_db.commit()
+
+# --- SQLite setup for staff ratings ---
+staff_ratings_db_lock = threading.Lock()
+staff_ratings_cursor = ticket_db.cursor()
+staff_ratings_cursor.execute('''
+CREATE TABLE IF NOT EXISTS staff_ratings (
+    staff_id INTEGER NOT NULL,
+    rating INTEGER NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+''')
+ticket_db.commit()
+
+# --- SQLite setup for vouches ---
+vouch_db_lock = threading.Lock()
+vouch_cursor = ticket_db.cursor()
+vouch_cursor.execute('''
+CREATE TABLE IF NOT EXISTS vouches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    staff_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    rating INTEGER NOT NULL,
+    description TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+''')
+ticket_db.commit()
+
+def add_staff_rating(staff_id, rating):
+    with staff_ratings_db_lock:
+        staff_ratings_cursor.execute('INSERT INTO staff_ratings (staff_id, rating) VALUES (?, ?)', (staff_id, rating))
+        ticket_db.commit()
+
+def get_staff_ratings(staff_id):
+    with staff_ratings_db_lock:
+        rows = staff_ratings_cursor.execute('SELECT rating FROM staff_ratings WHERE staff_id = ?', (staff_id,)).fetchall()
+        return [row['rating'] for row in rows]
+
+def count_five_star_ratings(staff_id):
+    with staff_ratings_db_lock:
+        row = staff_ratings_cursor.execute('SELECT COUNT(*) as count FROM staff_ratings WHERE staff_id = ? AND rating = 5', (staff_id,)).fetchone()
+        return row['count'] if row else 0
+
 intents_ticket = discord_ticket.Intents.all()
 bot_ticket = commands_ticket.Bot(command_prefix="dio!", intents=intents_ticket)
+
+bot_ticket.remove_command('help')
+
 ticket_counter = 0
-active_tickets = {}
+# --- SQLite helper functions for tickets ---
+def get_ticket(ticket_id):
+    with ticket_db_lock:
+        row = ticket_cursor.execute('SELECT creator_id, staff_id, status FROM tickets WHERE ticket_id = ?', (ticket_id,)).fetchone()
+        if row:
+            return {'creator_id': row['creator_id'], 'staff_id': row['staff_id'], 'status': row['status']}
+        else:
+            return None
+
+def create_ticket(ticket_id, creator_id):
+    with ticket_db_lock:
+        ticket_cursor.execute('INSERT OR REPLACE INTO tickets (ticket_id, creator_id, staff_id, status) VALUES (?, ?, ?, ?)', (ticket_id, creator_id, None, 'open'))
+        ticket_db.commit()
+
+def update_ticket_staff(ticket_id, staff_id):
+    with ticket_db_lock:
+        ticket_cursor.execute('UPDATE tickets SET staff_id = ? WHERE ticket_id = ?', (staff_id, ticket_id))
+        ticket_db.commit()
+
+def delete_ticket(ticket_id):
+    with ticket_db_lock:
+        ticket_cursor.execute('DELETE FROM tickets WHERE ticket_id = ?', (ticket_id,))
+        ticket_db.commit()
+
 staff_ratings = defaultdict_ticket(list)
 CATEGORY_ID = 1397234544368685269
 ALS_ROLE_ID = 1397023739631108188
@@ -449,7 +635,7 @@ class RatingButton(Button_ticket):
         self.rater_id = rater_id
     async def callback(self, interaction: discord_ticket.Interaction):
         if self.staff_id:
-            staff_ratings[self.staff_id].append(self.rating)
+            add_staff_rating(self.staff_id, self.rating)
             await interaction.response.send_message(f"\u2705 You rated {self.rating} stars!", ephemeral=True)
             log_channel = bot_ticket.get_channel(LOG_CHANNEL_ID)
             if log_channel:
@@ -460,7 +646,7 @@ class RatingButton(Button_ticket):
             guild = interaction.guild
             staff_member = guild.get_member(self.staff_id)
             if staff_member and self.rating == 5:
-                if staff_ratings[self.staff_id].count(5) == 15:
+                if count_five_star_ratings(self.staff_id) == 15:
                     role = guild.get_role(PROMOTION_ROLE_ID)
                     if role and role not in staff_member.roles:
                         await staff_member.add_roles(role)
@@ -476,31 +662,42 @@ class DeleteTicketButton(Button_ticket):
         super().__init__(label="\ud83d\uddd1\ufe0f Delete Ticket", style=discord_ticket.ButtonStyle.danger)
         self.creator_id = creator_id
     async def callback(self, interaction: discord_ticket.Interaction):
-        if interaction.user.id != self.creator_id:
+        ticket_data = get_ticket(interaction.channel.id)
+        if not ticket_data:
+            await interaction.response.send_message("\u274c This ticket does not exist or is already closed.", ephemeral=True)
+            return
+        if interaction.user.id != ticket_data['creator_id']:
             await interaction.response.send_message("\u274c Only the ticket creator can delete this ticket.", ephemeral=True)
             return
-        staff_id = active_tickets.get(interaction.channel.id, {}).get("staff_id")
-        if not staff_id:
-            await interaction.channel.delete()
-            return
-        view = RatingView(staff_id, interaction.channel, interaction.user.id)
-        await interaction.response.send_message("Please rate the support you received:", view=view, ephemeral=True)
+        delete_ticket(interaction.channel.id)
+        await interaction.response.send_message("\ud83d\uddd1\ufe0f Ticket deleted.", ephemeral=True)
+        await interaction.channel.delete()
+        staff_id = ticket_data['staff_id']
+        if staff_id:
+            staff_member = interaction.guild.get_member(staff_id)
+            if staff_member:
+                view = VouchView([staff_member], interaction.user.id)
+                try:
+                    await interaction.user.send("Would you like to vouch for the staff who helped you?", view=view)
+                except Exception:
+                    pass  # User may have DMs closed
+
 class TakeRequestButton(Button_ticket):
     def __init__(self, creator_id):
         super().__init__(label="\ud83c\udfaf Take Request", style=discord_ticket.ButtonStyle.primary)
         self.creator_id = creator_id
     async def callback(self, interaction: discord_ticket.Interaction):
-        data = active_tickets.get(interaction.channel.id)
-        if not data:
+        ticket_data = get_ticket(interaction.channel.id)
+        if not ticket_data:
             await interaction.response.send_message("\u26a0\ufe0f Internal error.", ephemeral=True)
             return
-        if data["staff_id"] is not None:
+        if ticket_data["staff_id"] is not None:
             await interaction.response.send_message("\u274c This request has already been taken.", ephemeral=True)
             return
-        if interaction.user.id == self.creator_id:
+        if interaction.user.id == ticket_data["creator_id"]:
             await interaction.response.send_message("\u274c You cannot take your own request.", ephemeral=True)
             return
-        data["staff_id"] = interaction.user.id
+        update_ticket_staff(interaction.channel.id, interaction.user.id)
         await interaction.channel.send(f"\u2705 This request has been taken by {interaction.user.mention}.")
         self.disabled = True
         await interaction.message.edit(view=self.view)
@@ -526,10 +723,7 @@ class TicketTypeSelect(Select_ticket):
             helpers_role: discord_ticket.PermissionOverwrite(read_messages=True, send_messages=True)
         }
         ticket_channel = await guild.create_text_channel(ticket_name, overwrites=overwrites, category=category)
-        active_tickets[ticket_channel.id] = {
-            "creator_id": interaction.user.id,
-            "staff_id": None
-        }
+        create_ticket(ticket_channel.id, interaction.user.id)
         view = View_ticket()
         view.add_item(TakeRequestButton(interaction.user.id))
         view.add_item(DeleteTicketButton(interaction.user.id))
@@ -550,15 +744,221 @@ async def ticketboard(ctx):
     await ctx.send("\ud83c\udfab Select a ticket type below:", view=view)
 @bot_ticket.command()
 async def staffratings(ctx):
-    if not staff_ratings:
+    if not get_staff_ratings(ctx.author.id):
         await ctx.send("No ratings yet.")
         return
     embed = discord_ticket.Embed(title="\u2b50 Staff Ratings", color=discord_ticket.Color.green())
-    for staff_id, ratings in staff_ratings.items():
+    for staff_id, ratings in get_staff_ratings(ctx.author.id):
         user = await bot_ticket.fetch_user(staff_id)
         avg = sum(ratings) / len(ratings)
         embed.add_field(name=f"{user}", value=f"{len(ratings)} ratings | Avg: {avg:.2f}\u2b50", inline=False)
     await ctx.send(embed=embed)
+
+# --- Discord UI for Vouching ---
+class VouchModal(discord_ticket.ui.Modal, title="Vouch Description"):
+    def __init__(self, staff_id, user_id, rating, on_submit_callback):
+        super().__init__()
+        self.staff_id = staff_id
+        self.user_id = user_id
+        self.rating = rating
+        self.on_submit_callback = on_submit_callback
+        self.description = discord_ticket.ui.TextInput(label="Describe your experience", style=discord_ticket.TextStyle.paragraph, required=False, max_length=500)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord_ticket.Interaction):
+        await self.on_submit_callback(interaction, self.staff_id, self.user_id, self.rating, self.description.value)
+
+class VouchView(discord_ticket.ui.View):
+    def __init__(self, staff_members, user_id):
+        super().__init__(timeout=120)
+        self.staff_members = staff_members
+        self.user_id = user_id
+        self.selected_staff_id = None
+        self.selected_rating = None
+        self.add_item(self.StaffSelect(staff_members, self))
+        self.add_item(self.StarSelect(self))
+        self.add_item(self.VouchButton(self))
+
+    class StaffSelect(discord_ticket.ui.Select):
+        def __init__(self, staff_members, parent_view):
+            options = [discord_ticket.SelectOption(label=member.display_name, value=str(member.id)) for member in staff_members]
+            super().__init__(placeholder="Select staff to vouch for", options=options, min_values=1, max_values=1)
+            self.parent_view = parent_view
+        async def callback(self, interaction: discord_ticket.Interaction):
+            self.parent_view.selected_staff_id = int(self.values[0])
+            await interaction.response.send_message(f"Selected staff: <@{self.values[0]}>", ephemeral=True)
+
+    class StarSelect(discord_ticket.ui.Select):
+        def __init__(self, parent_view):
+            options = [discord_ticket.SelectOption(label=f"{i} ⭐", value=str(i)) for i in range(1, 6)]
+            super().__init__(placeholder="Select rating (1-5 stars)", options=options, min_values=1, max_values=1)
+            self.parent_view = parent_view
+        async def callback(self, interaction: discord_ticket.Interaction):
+            self.parent_view.selected_rating = int(self.values[0])
+            await interaction.response.send_message(f"Selected rating: {self.values[0]} ⭐", ephemeral=True)
+
+    class VouchButton(discord_ticket.ui.Button):
+        def __init__(self, parent_view):
+            super().__init__(label="Submit Vouch", style=discord_ticket.ButtonStyle.success)
+            self.parent_view = parent_view
+        async def callback(self, interaction: discord_ticket.Interaction):
+            if not self.parent_view.selected_staff_id or not self.parent_view.selected_rating:
+                await interaction.response.send_message("Please select a staff member and a rating before submitting.", ephemeral=True)
+                return
+            modal = VouchModal(self.parent_view.selected_staff_id, self.parent_view.user_id, self.parent_view.selected_rating, on_submit_callback=handle_vouch_submit)
+            await interaction.response.send_modal(modal)
+
+async def handle_vouch_submit(interaction, staff_id, user_id, rating, description):
+    with vouch_db_lock:
+        vouch_cursor.execute('INSERT INTO vouches (staff_id, user_id, rating, description) VALUES (?, ?, ?, ?)', (staff_id, user_id, rating, description))
+        ticket_db.commit()
+    msg = f"Thank you for vouching for <@{staff_id}>!"
+    if description and description.strip():
+        msg += f"\nYour feedback: {description.strip()}"
+    await interaction.response.send_message(msg, ephemeral=True)
+    # Send to ratings log channel
+    log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        staff_mention = f"<@{staff_id}>"
+        user_mention = f"<@{user_id}>"
+        embed = discord_ticket.Embed(title="New Vouch Received", color=discord_ticket.Color.gold())
+        embed.add_field(name="Staff", value=staff_mention, inline=True)
+        embed.add_field(name="User", value=user_mention, inline=True)
+        embed.add_field(name="Rating", value=f"{rating} ⭐", inline=True)
+        if description and description.strip():
+            embed.add_field(name="Feedback", value=description.strip(), inline=False)
+        await log_channel.send(embed=embed)
+
+# --- Trigger VouchView after ticket deletion if staff handled ---
+# In DeleteTicketButton.callback, after deleting the ticket, if a staff_id exists, show the VouchView to the user.
+# Example:
+# staff_id = ticket_data['staff_id']
+# if staff_id:
+#     staff_member = interaction.guild.get_member(staff_id)
+#     if staff_member:
+#         view = VouchView([staff_member], interaction.user.id)
+#         await interaction.channel.send("Would you like to vouch for the staff who helped you?", view=view)
+
+# --- Ticket Bot Help Command ---
+@bot_ticket.command()
+async def help(ctx):
+    embed = discord_ticket.Embed(title="Ticket Bot Commands", color=discord_ticket.Color.green())
+    embed.add_field(name="dio!ticketboard", value="Open the ticket board to create a ticket.", inline=False)
+    embed.add_field(name="dio!staffratings", value="Show staff ratings.", inline=False)
+    await ctx.send(embed=embed)
+
+class VouchPaginationView(discord_ticket.ui.View):
+    def __init__(self, ctx, user=None, total=0, page=1, per_page=10, all_vouches=False):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.user = user
+        self.page = page
+        self.per_page = per_page
+        self.total = total
+        self.all_vouches = all_vouches  # <-- Ensure this is always set
+        self.total_pages = (total + per_page - 1) // per_page
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+        if self.page > 1:
+            self.add_item(self.PrevButton(self))
+        if self.page < self.total_pages:
+            self.add_item(self.NextButton(self))
+
+    class PrevButton(discord_ticket.ui.Button):
+        def __init__(self, parent):
+            super().__init__(label="Previous", style=discord_ticket.ButtonStyle.primary)
+            self.parent = parent
+        async def callback(self, interaction):
+            self.parent.page -= 1
+            await self.parent.update(interaction)
+
+    class NextButton(discord_ticket.ui.Button):
+        def __init__(self, parent):
+            super().__init__(label="Next", style=discord_ticket.ButtonStyle.primary)
+            self.parent = parent
+        async def callback(self, interaction):
+            self.parent.page += 1
+            await self.parent.update(interaction)
+
+    async def update(self, interaction):
+        self.update_buttons()
+        if self.all_vouches:
+            embed = await get_allvouches_embed(self.ctx, self.page, self.per_page)
+        else:
+            embed = await get_vouches_embed(self.ctx, self.user, self.page, self.per_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+async def get_vouches_embed(ctx, user, page, per_page):
+    offset = (page - 1) * per_page
+    with vouch_db_lock:
+        total = vouch_cursor.execute('SELECT COUNT(*) FROM vouches WHERE user_id = ?', (user.id,)).fetchone()[0]
+        rows = vouch_cursor.execute('SELECT staff_id, rating, description, timestamp FROM vouches WHERE user_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?', (user.id, per_page, offset)).fetchall()
+    embed = discord_ticket.Embed(title=f"🌟 Vouches by {user.display_name}", color=discord_ticket.Color.blurple())
+    for row in rows:
+        staff_member = ctx.guild.get_member(row['staff_id'])
+        staff_name = staff_member.display_name if staff_member else f"ID:{row['staff_id']}"
+        desc = row['description'] if row['description'] else 'No feedback.'
+        embed.add_field(
+            name=f"**🕒 {row['timestamp']}**\n👤 **Staff:** `{staff_name}`\n⭐ **Rating:** `{row['rating']} / 5`",
+            value=f"💬 **Feedback:** {desc}\n\u200b",
+            inline=False
+        )
+    total_pages = (total + per_page - 1) // per_page
+    embed.set_footer(text=f"Page {page}/{total_pages} | Total vouches: {total}")
+    return embed
+
+async def get_allvouches_embed(ctx, page, per_page):
+    offset = (page - 1) * per_page
+    with vouch_db_lock:
+        total = vouch_cursor.execute('SELECT COUNT(*) FROM vouches').fetchone()[0]
+        rows = vouch_cursor.execute('SELECT staff_id, user_id, rating, description, timestamp FROM vouches ORDER BY timestamp DESC LIMIT ? OFFSET ?', (per_page, offset)).fetchall()
+    embed = discord_ticket.Embed(title="🌟 All Vouches", color=discord_ticket.Color.green())
+    for row in rows:
+        staff_member = ctx.guild.get_member(row['staff_id'])
+        user_member = ctx.guild.get_member(row['user_id'])
+        staff_name = staff_member.display_name if staff_member else f"ID:{row['staff_id']}"
+        user_name = user_member.display_name if user_member else f"ID:{row['user_id']}"
+        desc = row['description'] if row['description'] else 'No feedback.'
+        embed.add_field(
+            name=f"**🕒 {row['timestamp']}**\n👤 **Staff:** `{staff_name}`\n🙍 **User:** `{user_name}`\n⭐ **Rating:** `{row['rating']} / 5`",
+            value=f"💬 **Feedback:** {desc}\n\u200b",
+            inline=False
+        )
+    total_pages = (total + per_page - 1) // per_page
+    embed.set_footer(text=f"Page {page}/{total_pages} | Total vouches: {total}")
+    return embed
+
+@bot_ticket.command()
+async def vouches(ctx, user: discord_ticket.Member = None, page: int = 1):
+    user = user or ctx.author
+    per_page = 10
+    offset = (page - 1) * per_page
+    with vouch_db_lock:
+        total = vouch_cursor.execute('SELECT COUNT(*) FROM vouches WHERE user_id = ?', (user.id,)).fetchone()[0]
+        rows = vouch_cursor.execute('SELECT staff_id, rating, description, timestamp FROM vouches WHERE user_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?', (user.id, per_page, offset)).fetchall()
+    if not rows:
+        await ctx.send(f"No vouches found for {user.mention} on page {page}.")
+        return
+    embed = await get_vouches_embed(ctx, user, page, per_page)
+    view = VouchPaginationView(ctx, user=user, total=total, page=page, per_page=per_page, all_vouches=False)
+    await ctx.send(embed=embed, view=view)
+
+@bot_ticket.command()
+async def allvouches(ctx, page: int = 1):
+    per_page = 5
+    offset = (page - 1) * per_page
+    with vouch_db_lock:
+        total = vouch_cursor.execute('SELECT COUNT(*) FROM vouches').fetchone()[0]
+        rows = vouch_cursor.execute('SELECT staff_id, user_id, rating, description, timestamp FROM vouches ORDER BY timestamp DESC LIMIT ? OFFSET ?', (per_page, offset)).fetchall()
+    if not rows:
+        await ctx.send(f"No vouches found in the database on page {page}.")
+        return
+    embed = await get_allvouches_embed(ctx, page, per_page)
+    view = VouchPaginationView(ctx, total=total, page=page, per_page=per_page, all_vouches=True)
+    await ctx.send(embed=embed, view=view)
+
 def run_ticket_bot():
     bot_ticket.run(os.environ["TICKET_BOT_TOKEN"])
 
