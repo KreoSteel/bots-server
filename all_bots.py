@@ -1,10 +1,47 @@
 import threading
 import os
+import sys
 from dotenv import load_dotenv
 import yt_dlp
 load_dotenv()
 
-# ================== Application Bot ==================
+# Validate required environment variables
+required_tokens = [
+    "APP_BOT_TOKEN",
+    "GIVEAWAY_BOT_TOKEN",
+    "INVITES_BOT_TOKEN",
+    "TICKET_BOT_TOKEN",
+    "MUSIC_BOT_TOKEN"
+]
+
+missing_tokens = [token for token in required_tokens if not os.getenv(token)]
+if missing_tokens:
+    print(f"❌ Missing required environment variables: {', '.join(missing_tokens)}")
+    print("Please create a .env file with all required bot tokens.")
+    sys.exit(1)
+
+# Validate voice dependencies
+try:
+    import nacl
+    print("✅ PyNaCl is installed")
+except ImportError:
+    print("❌ PyNaCl is not installed. Please run: pip install PyNaCl")
+    print("Voice functionality will not work without PyNaCl.")
+    sys.exit(1)
+
+# Check for FFmpeg
+try:
+    import subprocess
+    result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+    if result.returncode == 0:
+        print("✅ FFmpeg is available")
+    else:
+        print("⚠️  FFmpeg not found. Voice functionality may not work properly.")
+        print("Please install FFmpeg: https://ffmpeg.org/download.html")
+except FileNotFoundError:
+    print("⚠️  FFmpeg not found. Voice functionality may not work properly.")
+    print("Please install FFmpeg: https://ffmpeg.org/download.html")
+
 import discord as discord_app
 from discord.ext import commands as commands_app
 from discord.ui import Button as Button_app, View as View_app
@@ -267,7 +304,11 @@ async def help(ctx):
     await ctx.send(embed=embed)
 
 def run_application_bot():
-    bot_app.run(os.environ["APP_BOT_TOKEN"])
+    try:
+        print("🚀 Starting Application Bot...")
+        bot_app.run(os.environ["APP_BOT_TOKEN"])
+    except Exception as e:
+        print(f"❌ Application Bot failed to start: {e}")
 
 # ================== Giveaway Levels Bot ==================
 import discord as discord_give
@@ -439,7 +480,11 @@ async def countdown_timer():
     for gid in expired:
         del giveaway_data[gid]
 def run_giveaway_bot():
-    bot_give.run(os.environ["GIVEAWAY_BOT_TOKEN"])
+    try:
+        print("🎁 Starting Giveaway Bot...")
+        bot_give.run(os.environ["GIVEAWAY_BOT_TOKEN"])
+    except Exception as e:
+        print(f"❌ Giveaway Bot failed to start: {e}")
 
 # --- Giveaway Levels Bot Help Command ---
 @bot_give.command(name="help")
@@ -525,7 +570,11 @@ async def lb(ctx):
     await ctx.send(embed=embed)
 
 def run_invites_bot():
-    bot_inv.run(os.environ["INVITES_BOT_TOKEN"])
+    try:
+        print("📨 Starting Invites Bot...")
+        bot_inv.run(os.environ["INVITES_BOT_TOKEN"])
+    except Exception as e:
+        print(f"❌ Invites Bot failed to start: {e}")
 
 # ================== Ticket Bot ==================
 import discord as discord_ticket
@@ -961,7 +1010,11 @@ async def allvouches(ctx, page: int = 1):
     await ctx.send(embed=embed, view=view)
 
 def run_ticket_bot():
-    bot_ticket.run(os.environ["TICKET_BOT_TOKEN"])
+    try:
+        print("🎫 Starting Ticket Bot...")
+        bot_ticket.run(os.environ["TICKET_BOT_TOKEN"])
+    except Exception as e:
+        print(f"❌ Ticket Bot failed to start: {e}")
 
 # ================== Music Bot ==================
 import discord as discord_music
@@ -997,17 +1050,31 @@ async def music_play(ctx, *, query: str):
         return
 
     channel = voice_state.channel
+    
+    # Check if we have voice permissions
+    if not channel.permissions_for(ctx.guild.me).connect:
+        await ctx.send('❌ I don\'t have permission to connect to this voice channel!')
+        return
+    
+    if not channel.permissions_for(ctx.guild.me).speak:
+        await ctx.send('❌ I don\'t have permission to speak in this voice channel!')
+        return
+
     # Connect to voice channel if not already connected
     if ctx.voice_client is None:
         try:
-            vc = await channel.connect()
+            vc = await channel.connect(timeout=20.0)
         except Exception as e:
             await ctx.send(f'❌ Could not join voice channel: {e}')
             return
     else:
         vc = ctx.voice_client
         if vc.channel != channel:
-            await vc.move_to(channel)
+            try:
+                await vc.move_to(channel)
+            except Exception as e:
+                await ctx.send(f'❌ Could not move to voice channel: {e}')
+                return
 
     await ctx.send(f'🔍 Searching for: {query}')
 
@@ -1140,21 +1207,43 @@ async def music_nowplaying(ctx):
         await ctx.send('❌ No song is currently playing.')
 
 def run_music_bot():
-    bot_music.run(os.environ["MUSIC_BOT_TOKEN"])
+    try:
+        print("🎵 Starting Music Bot...")
+        bot_music.run(os.environ["MUSIC_BOT_TOKEN"])
+    except Exception as e:
+        print(f"❌ Music Bot failed to start: {e}")
 
 # ================== Start All Bots ==================
 if __name__ == "__main__":
-    threads = [
-        threading.Thread(target=run_application_bot),
-        threading.Thread(target=run_giveaway_bot),
-        threading.Thread(target=run_invites_bot),
-        threading.Thread(target=run_ticket_bot),
-        threading.Thread(target=run_music_bot),
+    print("🤖 Starting Discord Bot Orchestrator...")
+    print("=" * 50)
+    
+    # Start bots with error handling
+    threads = []
+    bot_functions = [
+        ("Application Bot", run_application_bot),
+        ("Giveaway Bot", run_giveaway_bot),
+        ("Invites Bot", run_invites_bot),
+        ("Ticket Bot", run_ticket_bot),
+        ("Music Bot", run_music_bot),
     ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-
-# ================== Start All Bots ==================
+    
+    for name, func in bot_functions:
+        thread = threading.Thread(target=func, name=name)
+        thread.daemon = True  # Allow main thread to exit if bots fail
+        threads.append(thread)
+        thread.start()
+        print(f"✅ {name} thread started")
+    
+    print("=" * 50)
+    print("🎉 All bots are starting up...")
+    print("Press Ctrl+C to stop all bots")
+    
+    try:
+        # Wait for all threads to complete (they won't unless there's an error)
+        for thread in threads:
+            thread.join()
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down bots...")
+        print("Bots will disconnect automatically")
+        sys.exit(0)
