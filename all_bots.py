@@ -3,6 +3,9 @@ import os
 import sys
 from dotenv import load_dotenv
 import yt_dlp
+import asyncio
+
+last_ticketboard_message = None
 load_dotenv()
 
 # Validate required environment variables
@@ -151,8 +154,18 @@ class ApplicationButton(Button_app):
         view = View_app()
         view.add_item(AcceptButton(self.app_type, user))
         view.add_item(RejectButton(user))
-        view.add_item(DeleteTicketButton(channel, user))
-        await channel.send("Staff controls:", view=view)
+        # view.add_item(DeleteTicketButton(channel, user))  # Removed as requested
+        staff_controls_msg = await channel.send("Staff controls:", view=view)
+
+        # Remove ticket buttons after 1 minute (delete the message)
+        async def remove_ticket_buttons_later(message, delay=60):
+            await asyncio.sleep(delay)
+            try:
+                await message.delete()
+            except Exception:
+                pass  # Message might be deleted already
+        # Schedule the task in the background (non-blocking, safe inside async function)
+        asyncio.create_task(remove_ticket_buttons_later(staff_controls_msg))
 
 class AcceptButton(Button_app):
     def __init__(self, app_type, user):
@@ -302,6 +315,10 @@ async def help(ctx):
     embed.add_field(name="!rules", value="Show the server rules.", inline=False)
     embed.add_field(name="!application", value="Start an application process.", inline=False)
     await ctx.send(embed=embed)
+
+@bot_app.event
+async def on_ready():
+    print(f"bot_app is online! Username: {bot_app.user} (ID: {bot_app.user.id})")
 
 def run_application_bot():
     try:
@@ -500,6 +517,7 @@ import discord as discord_inv
 from discord.ext import commands as commands_inv
 import json as json_inv
 import os as os_inv
+import collections
 # --- SQLite setup for Invites Bot ---
 invites_db_lock = threading.Lock()
 invites_db = sqlite3.connect('invites.db', check_same_thread=False)
@@ -512,6 +530,67 @@ CREATE TABLE IF NOT EXISTS invites (
 )
 ''')
 invites_db.commit()
+
+# --- Invite Cache for Tracking ---
+invite_cache = {}
+
+intents_inv = discord_inv.Intents.all()
+bot_inv = commands_inv.Bot(command_prefix='inv!', intents=intents_inv)
+data_file = 'invites.json'
+if not os_inv.path.exists(data_file):
+    with open(data_file, 'w') as f:
+        json_inv.dump({}, f)
+bot_inv.remove_command('help')
+
+@bot_inv.event
+async def on_ready():
+    print(f"Logged in as {bot_inv.user} (Invite Tracker)")
+    for guild in bot_inv.guilds:
+        invites = await guild.invites()
+        invite_cache[guild.id] = {invite.code: invite.uses for invite in invites}
+
+@bot_inv.event
+async def on_guild_join(guild):
+    invites = await guild.invites()
+    invite_cache[guild.id] = {invite.code: invite.uses for invite in invites}
+
+@bot_inv.event
+async def on_member_join(member):
+    guild = member.guild
+    before = invite_cache.get(guild.id, {})
+    invites = await guild.invites()
+    invite_cache[guild.id] = {invite.code: invite.uses for invite in invites}
+    used_code = None
+    inviter_id = None
+    for invite in invites:
+        if invite.code in before and invite.uses > before[invite.code]:
+            used_code = invite.code
+            inviter_id = invite.inviter.id if invite.inviter else None
+            break
+        elif invite.code not in before and invite.uses > 0:
+            used_code = invite.code
+            inviter_id = invite.inviter.id if invite.inviter else None
+            break
+    # Handle vanity URL
+    if not used_code and guild.vanity_url_code:
+        vanity = await guild.vanity_invite()
+        if vanity and vanity.uses > before.get('vanity', 0):
+            used_code = 'vanity'
+            inviter_id = None  # Can't track inviter for vanity
+    if inviter_id:
+        add_invite_points(inviter_id, 1)
+
+@bot_inv.event
+async def on_member_remove(member):
+    # Try to detect who invited this member (optional: store joiner->inviter mapping for accuracy)
+    # For now, just check invites again and update cache
+    guild = member.guild
+    invites = await guild.invites()
+    invite_cache[guild.id] = {invite.code: invite.uses for invite in invites}
+    # If you want to subtract from inviter, you need to store joiner->inviter mapping on join
+    # (not implemented here, but can be added if needed)
+    # For now, this will not subtract points unless you want to implement joiner->inviter mapping.
+    pass
 
 def get_invite_points(user_id):
     with invites_db_lock:
@@ -533,14 +612,6 @@ def add_invite_points(user_id, points):
 def remove_invite_points(user_id, points):
     current = get_invite_points(user_id)
     set_invite_points(user_id, max(0, current - points))
-
-intents_inv = discord_inv.Intents.all()
-bot_inv = commands_inv.Bot(command_prefix='inv!', intents=intents_inv)
-data_file = 'invites.json'
-if not os_inv.path.exists(data_file):
-    with open(data_file, 'w') as f:
-        json_inv.dump({}, f)
-bot_inv.remove_command('help')
 
 @bot_inv.command()
 async def add(ctx, member: discord_inv.Member, points: int):
@@ -609,7 +680,7 @@ CREATE TABLE IF NOT EXISTS staff_ratings (
 ''')
 ticket_db.commit()
 
-# --- SQLite setup for vouches ---
+# --- SQLite setup for vouches (using ticket_db) ---
 vouch_db_lock = threading.Lock()
 vouch_cursor = ticket_db.cursor()
 vouch_cursor.execute('''
@@ -642,7 +713,108 @@ def count_five_star_ratings(staff_id):
 intents_ticket = discord_ticket.Intents.all()
 bot_ticket = commands_ticket.Bot(command_prefix="dio!", intents=intents_ticket)
 
-bot_ticket.remove_command('help')
+# Persistent view for ticket controls
+class PersistentTicketView(View_ticket):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(CloseTicketButton("persistent"))
+        self.add_item(DeleteTicketButton("persistent"))
+
+# Update CloseTicketButton and DeleteTicketButton to use static custom_id for persistence
+class CloseTicketButton(Button_ticket):
+    def __init__(self, creator_id):
+        super().__init__(label="🔒 Close Ticket", style=discord_ticket.ButtonStyle.secondary, custom_id=f"close_ticket:{creator_id}")
+        self.creator_id = creator_id
+    async def callback(self, interaction: discord_ticket.Interaction):
+        ticket_data = get_ticket(interaction.channel.id)
+        if not ticket_data:
+            await interaction.response.send_message("⚠️ Internal error.", ephemeral=True)
+            return
+        if interaction.user.id != ticket_data["creator_id"]:
+            await interaction.response.send_message("❌ Only the ticket creator can close this ticket.", ephemeral=True)
+            return
+        # Edit the message to show only the persistent DeleteTicketButton
+        view = PersistentTicketView()
+        view.clear_items()
+        view.add_item(DeleteTicketButton("persistent"))
+        await interaction.message.edit(view=view)
+        await interaction.response.send_message("🔒 Ticket closed! You can now delete it.", ephemeral=True)
+
+# --- Persistent DeleteTicketButton for Ticket Bot ---
+class DeleteTicketButton(Button_ticket):
+    def __init__(self, creator_id):
+        super().__init__(label="\U0001f5d1\ufe0f Delete Ticket", style=discord_ticket.ButtonStyle.danger, custom_id=f"delete_ticket:{creator_id}")
+        self.creator_id = creator_id
+
+# --- Persistent TakeRequestButton for Ticket Bot ---
+class TakeRequestButton(Button_ticket):
+    def __init__(self, creator_id):
+        super().__init__(label="\U0001f3af Take Request", style=discord_ticket.ButtonStyle.primary, custom_id=f"take_request:{creator_id}")
+        self.creator_id = creator_id
+    async def callback(self, interaction: discord_ticket.Interaction):
+        ticket_data = get_ticket(interaction.channel.id)
+        if not ticket_data:
+            await interaction.response.send_message("\u26a0\ufe0f Internal error.", ephemeral=True)
+            return
+        if ticket_data["staff_id"] is not None:
+            await interaction.response.send_message("\u274c This request has already been taken.", ephemeral=True)
+            return
+        if interaction.user.id == ticket_data["creator_id"]:
+            await interaction.response.send_message("\u274c You cannot take your own request.", ephemeral=True)
+            return
+        update_ticket_staff(interaction.channel.id, interaction.user.id)
+        await interaction.channel.send(f"\u2705 This request has been taken by {interaction.user.mention}.")
+        # Disable the button in the view
+        view = await interaction.message.view.from_message(interaction.message)
+        for item in view.children:
+            if isinstance(item, TakeRequestButton):
+                item.disabled = True
+        await interaction.message.edit(view=view)
+        await interaction.response.send_message("\U0001f3af You claimed this request!", ephemeral=True)
+
+# --- Persistent View Registration ---
+@bot_ticket.event
+async def on_ready():
+    print(f"bot_ticket is online! Username: {bot_ticket.user} (ID: {bot_ticket.user.id})")
+    # Register persistent views for TakeRequestButton and DeleteTicketButton
+    class PersistentTicketView(View_ticket):
+        def __init__(self):
+            super().__init__(timeout=None)
+            self.add_item(TakeRequestButton("persistent"))
+            self.add_item(DeleteTicketButton("persistent"))
+    bot_ticket.add_view(PersistentTicketView())
+
+# --- Global handler for persistent DeleteTicketButton ---
+@bot_ticket.event
+async def on_interaction(interaction: discord_ticket.Interaction):
+    # Only handle component interactions
+    if not interaction.type.name == "component":
+        return
+    # Handle persistent DeleteTicketButton
+    if interaction.data.get("custom_id", "").startswith("delete_ticket:"):
+        ticket_data = get_ticket(interaction.channel.id)
+        if not ticket_data:
+            await interaction.response.send_message("\u274c This ticket does not exist or is already closed.", ephemeral=True)
+            return
+        if interaction.user.id != ticket_data['creator_id']:
+            await interaction.response.send_message("\u274c Only the ticket creator can delete this ticket.", ephemeral=True)
+            return
+        delete_ticket(interaction.channel.id)
+        await interaction.response.send_message("\U0001f5d1\ufe0f Ticket deleted.", ephemeral=True)
+        await interaction.channel.delete()
+        staff_id = ticket_data['staff_id']
+        if staff_id:
+            staff_member = None
+            for g in bot_ticket.guilds:
+                staff_member = g.get_member(staff_id)
+                if staff_member:
+                    break
+            if staff_member:
+                view = VouchView([staff_member], interaction.user.id)
+                try:
+                    await interaction.user.send("Would you like to vouch for the staff who helped you?", view=view)
+                except Exception:
+                    pass  # User may have DMs closed
 
 ticket_counter = 0
 # --- SQLite helper functions for tickets ---
@@ -704,242 +876,38 @@ class RatingButton(Button_ticket):
             await self.ticket_channel.delete()
 class RatingView(View_ticket):
     def __init__(self, staff_id, ticket_channel, rater_id):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         for i in range(1, 6):
             self.add_item(RatingButton(i, staff_id, ticket_channel, rater_id))
-class DeleteTicketButton(Button_ticket):
-    def __init__(self, creator_id):
-        super().__init__(label="\ud83d\uddd1\ufe0f Delete Ticket", style=discord_ticket.ButtonStyle.danger)
-        self.creator_id = creator_id
-    async def callback(self, interaction: discord_ticket.Interaction):
-        ticket_data = get_ticket(interaction.channel.id)
-        if not ticket_data:
-            await interaction.response.send_message("\u274c This ticket does not exist or is already closed.", ephemeral=True)
-            return
-        if interaction.user.id != ticket_data['creator_id']:
-            await interaction.response.send_message("\u274c Only the ticket creator can delete this ticket.", ephemeral=True)
-            return
-        delete_ticket(interaction.channel.id)
-        await interaction.response.send_message("\ud83d\uddd1\ufe0f Ticket deleted.", ephemeral=True)
-        await interaction.channel.delete()
-        staff_id = ticket_data['staff_id']
-        if staff_id:
-            staff_member = interaction.guild.get_member(staff_id)
-            if staff_member:
-                view = VouchView([staff_member], interaction.user.id)
-                try:
-                    await interaction.user.send("Would you like to vouch for the staff who helped you?", view=view)
-                except Exception:
-                    pass  # User may have DMs closed
 
-class TakeRequestButton(Button_ticket):
-    def __init__(self, creator_id):
-        super().__init__(label="\ud83c\udfaf Take Request", style=discord_ticket.ButtonStyle.primary)
-        self.creator_id = creator_id
-    async def callback(self, interaction: discord_ticket.Interaction):
-        ticket_data = get_ticket(interaction.channel.id)
-        if not ticket_data:
-            await interaction.response.send_message("\u26a0\ufe0f Internal error.", ephemeral=True)
-            return
-        if ticket_data["staff_id"] is not None:
-            await interaction.response.send_message("\u274c This request has already been taken.", ephemeral=True)
-            return
-        if interaction.user.id == ticket_data["creator_id"]:
-            await interaction.response.send_message("\u274c You cannot take your own request.", ephemeral=True)
-            return
-        update_ticket_staff(interaction.channel.id, interaction.user.id)
-        await interaction.channel.send(f"\u2705 This request has been taken by {interaction.user.mention}.")
-        self.disabled = True
-        await interaction.message.edit(view=self.view)
-        await interaction.response.send_message("\ud83c\udfaf You claimed this request!", ephemeral=True)
-class TicketTypeSelect(Select_ticket):
-    def __init__(self):
-        options = [
-            discord_ticket.SelectOption(label="ALS", description="Open a ticket for ALS Staff"),
-            discord_ticket.SelectOption(label="ASTDX", description="Open a ticket for ASTDX Staffs")
-        ]
-        super().__init__(placeholder="Ticket Selector", options=options)
-    async def callback(self, interaction: discord_ticket.Interaction):
-        global ticket_counter
-        ticket_counter += 1
-        ticket_type = self.values[0].lower()
-        ticket_name = f"{ticket_type}-ticket-{ticket_counter:04}"
-        guild = interaction.guild
-        category = guild.get_channel(CATEGORY_ID)
-        helpers_role = guild.get_role(STAFF_ROLE_ID)
-        overwrites = {
-            guild.default_role: discord_ticket.PermissionOverwrite(read_messages=False),
-            interaction.user: discord_ticket.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, embed_links=True),
-            helpers_role: discord_ticket.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-        ticket_channel = await guild.create_text_channel(ticket_name, overwrites=overwrites, category=category)
-        create_ticket(ticket_channel.id, interaction.user.id)
-        view = View_ticket()
-        view.add_item(TakeRequestButton(interaction.user.id))
-        view.add_item(DeleteTicketButton(interaction.user.id))
-        role_id = ALS_ROLE_ID if ticket_type == "als" else ASTDX_ROLE_ID
-        staff_role = guild.get_role(role_id)
-        await ticket_channel.send(f"{interaction.user.mention} has opened a **{ticket_type.upper()}** support ticket!\n{staff_role.mention if staff_role else ''}", view=view)
-        await interaction.response.send_message(f"\u2705 Your ticket has been created: {ticket_channel.mention}", ephemeral=True)
-        self.view.clear_items()
-        self.view.add_item(TicketTypeSelect())
-        await interaction.message.edit(view=self.view)
-class TicketBoardView(View_ticket):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(TicketTypeSelect())
-@bot_ticket.command()
-async def ticketboard(ctx):
-    view = TicketBoardView()
-    await ctx.send("\ud83c\udfab Select a ticket type below:", view=view)
-@bot_ticket.command()
-async def staffratings(ctx):
-    if not get_staff_ratings(ctx.author.id):
-        await ctx.send("No ratings yet.")
-        return
-    embed = discord_ticket.Embed(title="\u2b50 Staff Ratings", color=discord_ticket.Color.green())
-    for staff_id, ratings in get_staff_ratings(ctx.author.id):
-        user = await bot_ticket.fetch_user(staff_id)
-        avg = sum(ratings) / len(ratings)
-        embed.add_field(name=f"{user}", value=f"{len(ratings)} ratings | Avg: {avg:.2f}\u2b50", inline=False)
-    await ctx.send(embed=embed)
-
-# --- Discord UI for Vouching ---
-class VouchModal(discord_ticket.ui.Modal, title="Vouch Description"):
-    def __init__(self, staff_id, user_id, rating, on_submit_callback):
-        super().__init__()
-        self.staff_id = staff_id
-        self.user_id = user_id
-        self.rating = rating
-        self.on_submit_callback = on_submit_callback
-        self.description = discord_ticket.ui.TextInput(label="Describe your experience", style=discord_ticket.TextStyle.paragraph, required=False, max_length=500)
-        self.add_item(self.description)
-
-    async def on_submit(self, interaction: discord_ticket.Interaction):
-        await self.on_submit_callback(interaction, self.staff_id, self.user_id, self.rating, self.description.value)
-
-class VouchView(discord_ticket.ui.View):
-    def __init__(self, staff_members, user_id):
-        super().__init__(timeout=120)
-        self.staff_members = staff_members
-        self.user_id = user_id
-        self.selected_staff_id = None
-        self.selected_rating = None
-        self.add_item(self.StaffSelect(staff_members, self))
-        self.add_item(self.StarSelect(self))
-        self.add_item(self.VouchButton(self))
-
-    class StaffSelect(discord_ticket.ui.Select):
-        def __init__(self, staff_members, parent_view):
-            options = [discord_ticket.SelectOption(label=member.display_name, value=str(member.id)) for member in staff_members]
-            super().__init__(placeholder="Select staff to vouch for", options=options, min_values=1, max_values=1)
-            self.parent_view = parent_view
-        async def callback(self, interaction: discord_ticket.Interaction):
-            self.parent_view.selected_staff_id = int(self.values[0])
-            await interaction.response.send_message(f"Selected staff: <@{self.values[0]}>", ephemeral=True)
-
-    class StarSelect(discord_ticket.ui.Select):
-        def __init__(self, parent_view):
-            options = [discord_ticket.SelectOption(label=f"{i} ⭐", value=str(i)) for i in range(1, 6)]
-            super().__init__(placeholder="Select rating (1-5 stars)", options=options, min_values=1, max_values=1)
-            self.parent_view = parent_view
-        async def callback(self, interaction: discord_ticket.Interaction):
-            self.parent_view.selected_rating = int(self.values[0])
-            await interaction.response.send_message(f"Selected rating: {self.values[0]} ⭐", ephemeral=True)
-
-    class VouchButton(discord_ticket.ui.Button):
-        def __init__(self, parent_view):
-            super().__init__(label="Submit Vouch", style=discord_ticket.ButtonStyle.success)
-            self.parent_view = parent_view
-        async def callback(self, interaction: discord_ticket.Interaction):
-            if not self.parent_view.selected_staff_id or not self.parent_view.selected_rating:
-                await interaction.response.send_message("Please select a staff member and a rating before submitting.", ephemeral=True)
-                return
-            modal = VouchModal(self.parent_view.selected_staff_id, self.parent_view.user_id, self.parent_view.selected_rating, on_submit_callback=handle_vouch_submit)
-            await interaction.response.send_modal(modal)
-
+# --- Vouch Submit Handler ---
 async def handle_vouch_submit(interaction, staff_id, user_id, rating, description):
+    await interaction.response.send_message(
+        f"Thank you for your vouch!\nStaff: <@{staff_id}>\nRating: {rating} stars\nDescription: {description}",
+        ephemeral=True
+    )
+    # Save the vouch to the database (thread-safe)
     with vouch_db_lock:
-        vouch_cursor.execute('INSERT INTO vouches (staff_id, user_id, rating, description) VALUES (?, ?, ?, ?)', (staff_id, user_id, rating, description))
+        vouch_cursor.execute(
+            'INSERT INTO vouches (staff_id, user_id, rating, description) VALUES (?, ?, ?, ?)',
+            (staff_id, user_id, rating, description)
+        )
         ticket_db.commit()
-    msg = f"Thank you for vouching for <@{staff_id}>!"
-    if description and description.strip():
-        msg += f"\nYour feedback: {description.strip()}"
-    await interaction.response.send_message(msg, ephemeral=True)
-    # Send to ratings log channel
-    log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        staff_mention = f"<@{staff_id}>"
-        user_mention = f"<@{user_id}>"
-        embed = discord_ticket.Embed(title="New Vouch Received", color=discord_ticket.Color.gold())
-        embed.add_field(name="Staff", value=staff_mention, inline=True)
-        embed.add_field(name="User", value=user_mention, inline=True)
-        embed.add_field(name="Rating", value=f"{rating} ⭐", inline=True)
-        if description and description.strip():
-            embed.add_field(name="Feedback", value=description.strip(), inline=False)
-        await log_channel.send(embed=embed)
+    # Try to get the guild from the bot's cache (since interaction.guild may be None in DMs)
+    guild = None
+    for g in bot_ticket.guilds:
+        if g.get_member(staff_id):
+            guild = g
+            break
+    log_channel = bot_ticket.get_channel(LOG_CHANNEL_ID)
+    if log_channel and guild:
+        user = guild.get_member(user_id)
+        staff = guild.get_member(staff_id)
+        await log_channel.send(
+            f"📝 **Vouch Submitted**\nStaff: {staff.mention if staff else staff_id}\nFrom: {user.mention if user else user_id}\nRating: {rating} stars\nDescription: {description if description else 'No description.'}"
+        )
 
-# --- Trigger VouchView after ticket deletion if staff handled ---
-# In DeleteTicketButton.callback, after deleting the ticket, if a staff_id exists, show the VouchView to the user.
-# Example:
-# staff_id = ticket_data['staff_id']
-# if staff_id:
-#     staff_member = interaction.guild.get_member(staff_id)
-#     if staff_member:
-#         view = VouchView([staff_member], interaction.user.id)
-#         await interaction.channel.send("Would you like to vouch for the staff who helped you?", view=view)
-
-# --- Ticket Bot Help Command ---
-@bot_ticket.command()
-async def help(ctx):
-    embed = discord_ticket.Embed(title="Ticket Bot Commands", color=discord_ticket.Color.green())
-    embed.add_field(name="dio!ticketboard", value="Open the ticket board to create a ticket.", inline=False)
-    embed.add_field(name="dio!staffratings", value="Show staff ratings.", inline=False)
-    await ctx.send(embed=embed)
-
-class VouchPaginationView(discord_ticket.ui.View):
-    def __init__(self, ctx, user=None, total=0, page=1, per_page=10, all_vouches=False):
-        super().__init__(timeout=60)
-        self.ctx = ctx
-        self.user = user
-        self.page = page
-        self.per_page = per_page
-        self.total = total
-        self.all_vouches = all_vouches  # <-- Ensure this is always set
-        self.total_pages = (total + per_page - 1) // per_page
-        self.update_buttons()
-
-    def update_buttons(self):
-        self.clear_items()
-        if self.page > 1:
-            self.add_item(self.PrevButton(self))
-        if self.page < self.total_pages:
-            self.add_item(self.NextButton(self))
-
-    class PrevButton(discord_ticket.ui.Button):
-        def __init__(self, parent):
-            super().__init__(label="Previous", style=discord_ticket.ButtonStyle.primary)
-            self.parent = parent
-        async def callback(self, interaction):
-            self.parent.page -= 1
-            await self.parent.update(interaction)
-
-    class NextButton(discord_ticket.ui.Button):
-        def __init__(self, parent):
-            super().__init__(label="Next", style=discord_ticket.ButtonStyle.primary)
-            self.parent = parent
-        async def callback(self, interaction):
-            self.parent.page += 1
-            await self.parent.update(interaction)
-
-    async def update(self, interaction):
-        self.update_buttons()
-        if self.all_vouches:
-            embed = await get_allvouches_embed(self.ctx, self.page, self.per_page)
-        else:
-            embed = await get_vouches_embed(self.ctx, self.user, self.page, self.per_page)
-        await interaction.response.edit_message(embed=embed, view=self)
-
+# --- Vouch Pagination View ---
 async def get_vouches_embed(ctx, user, page, per_page):
     offset = (page - 1) * per_page
     with vouch_db_lock:
@@ -1008,6 +976,304 @@ async def allvouches(ctx, page: int = 1):
     embed = await get_allvouches_embed(ctx, page, per_page)
     view = VouchPaginationView(ctx, total=total, page=page, per_page=per_page, all_vouches=True)
     await ctx.send(embed=embed, view=view)
+
+# --- Discord UI for Vouching ---
+class VouchModal(discord_ticket.ui.Modal, title="Vouch Description"):
+    def __init__(self, staff_id, user_id, rating, on_submit_callback):
+        super().__init__()
+        self.staff_id = staff_id
+        self.user_id = user_id
+        self.rating = rating
+        self.on_submit_callback = on_submit_callback
+        self.description = discord_ticket.ui.TextInput(label="Describe your experience", style=discord_ticket.TextStyle.paragraph, required=False, max_length=500)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord_ticket.Interaction):
+        await self.on_submit_callback(interaction, self.staff_id, self.user_id, self.rating, self.description.value)
+
+class VouchView(discord_ticket.ui.View):
+    def __init__(self, staff_members, user_id):
+        super().__init__(timeout=None)
+        self.staff_members = staff_members
+        self.user_id = user_id
+        self.selected_staff_id = None
+        self.selected_rating = None
+        self.add_item(self.StaffSelect(staff_members, self))
+        self.add_item(self.StarSelect(self))
+        self.add_item(self.VouchButton(self))
+
+    class StaffSelect(discord_ticket.ui.Select):
+        def __init__(self, staff_members, parent_view):
+            options = [discord_ticket.SelectOption(label=member.display_name, value=str(member.id)) for member in staff_members]
+            super().__init__(placeholder="Select staff to vouch for", options=options, min_values=1, max_values=1, custom_id="vouch_staff_select")
+            self.parent_view = parent_view
+        async def callback(self, interaction: discord_ticket.Interaction):
+            self.parent_view.selected_staff_id = int(self.values[0])
+            await interaction.response.send_message(f"Selected staff: <@{self.values[0]}>", ephemeral=True)
+
+    class StarSelect(discord_ticket.ui.Select):
+        def __init__(self, parent_view):
+            options = [discord_ticket.SelectOption(label=f"{i} ⭐", value=str(i)) for i in range(1, 6)]
+            super().__init__(placeholder="Select rating (1-5 stars)", options=options, min_values=1, max_values=1, custom_id="vouch_star_select")
+            self.parent_view = parent_view
+        async def callback(self, interaction: discord_ticket.Interaction):
+            self.parent_view.selected_rating = int(self.values[0])
+            await interaction.response.send_message(f"Selected rating: {self.values[0]} ⭐", ephemeral=True)
+
+    class VouchButton(discord_ticket.ui.Button):
+        def __init__(self, parent_view):
+            super().__init__(label="Submit Vouch", style=discord_ticket.ButtonStyle.success, custom_id="vouch_submit")
+            self.parent_view = parent_view
+
+        async def callback(self, interaction: discord_ticket.Interaction):
+            if not self.parent_view.selected_staff_id or not self.parent_view.selected_rating:
+                await interaction.response.send_message("Please select a staff member and a rating before submitting.", ephemeral=True)
+                return
+            modal = VouchModal(
+                self.parent_view.selected_staff_id,
+                self.parent_view.user_id,
+                self.parent_view.selected_rating,
+                on_submit_callback=handle_vouch_submit
+            )
+            await interaction.response.send_modal(modal)
+
+# Add the dio!vouch command ---
+@bot_ticket.command(name="vouch")
+async def vouch(ctx):
+    print("vouch command triggered")
+    # Try to get all staff members from the guild
+    staff_role = ctx.guild.get_role(STAFF_ROLE_ID)
+    if staff_role:
+        staff_members = staff_role.members
+    else:
+        staff_members = []
+    if not staff_members:
+        await ctx.send("No staff members found to vouch for.", ephemeral=True)
+        return
+    view = VouchView(staff_members, ctx.author.id)
+    try:
+        await ctx.author.send("Would you like to vouch for the staff who helped you?", view=view)
+        await ctx.send("Check your DMs to submit a vouch!", ephemeral=True)
+    except Exception:
+        await ctx.send("Could not send you a DM. Please check your privacy settings.", ephemeral=True)
+
+# Debug command to list all loaded commands
+@bot_ticket.command(name="commandsdebug")
+async def commandsdebug(ctx):
+    cmds = [c.name for c in bot_ticket.commands]
+    await ctx.send(f"Loaded commands: {cmds}")
+
+# --- Command to View Vouches ---
+# @bot_ticket.command(name="vouches") # This command is now handled by the new dio!vouches command
+# async def vouches(ctx, member: discord_ticket.Member = None):
+#     if member:
+#         rows = vouch_cursor.execute(
+#             'SELECT * FROM vouches WHERE staff_id = ? ORDER BY timestamp DESC LIMIT 10',
+#             (member.id,)
+#         ).fetchall()
+#         title = f"Vouches for {member.display_name}"
+#     else:
+#         rows = vouch_cursor.execute(
+#             'SELECT * FROM vouches ORDER BY timestamp DESC LIMIT 10'
+#         ).fetchall()
+#         title = "Recent Vouches"
+#     if not rows:
+#         await ctx.send("No vouches found.")
+#         return
+#     embed = discord_ticket.Embed(title=title, color=0x00ff00)
+#     for row in rows:
+#         user = ctx.guild.get_member(row['user_id'])
+#         embed.add_field(
+#             name=f"{row['rating']}⭐ from {user.display_name if user else row['user_id']}",
+#             value=row['description'] or "No description.",
+#             inline=False
+#         )
+#     await ctx.send(embed=embed)
+
+# --- Make all interactive ticket bot UI persistent ---
+# 1. All Views (VouchView, VouchPaginationView, RatingView, TicketBoardView, etc.) should have timeout=None.
+# 2. All Buttons and Selects must have a custom_id.
+# 3. Register all persistent views in on_ready.
+# 4. Add global on_interaction handlers for all persistent custom_ids.
+
+# --- Persistent VouchPaginationView ---
+class VouchPaginationView(discord_ticket.ui.View):
+    def __init__(self, ctx, user=None, total=0, page=1, per_page=10, all_vouches=False):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+        self.user = user
+        self.page = page
+        self.per_page = per_page
+        self.total = total
+        self.all_vouches = all_vouches
+        self.total_pages = (total + per_page - 1) // per_page
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+        if self.page > 1:
+            self.add_item(self.PrevButton(self))
+        if self.page < self.total_pages:
+            self.add_item(self.NextButton(self))
+
+    class PrevButton(discord_ticket.ui.Button):
+        def __init__(self, parent):
+            super().__init__(label="Previous", style=discord_ticket.ButtonStyle.primary, custom_id="vouch_prev")
+            self.parent = parent
+        async def callback(self, interaction):
+            self.parent.page -= 1
+            await self.parent.update(interaction)
+
+    class NextButton(discord_ticket.ui.Button):
+        def __init__(self, parent):
+            super().__init__(label="Next", style=discord_ticket.ButtonStyle.primary, custom_id="vouch_next")
+            self.parent = parent
+        async def callback(self, interaction):
+            self.parent.page += 1
+            await self.parent.update(interaction)
+
+    async def update(self, interaction):
+        self.update_buttons()
+        if self.all_vouches:
+            embed = await get_allvouches_embed(self.ctx, self.page, self.per_page)
+        else:
+            embed = await get_vouches_embed(self.ctx, self.user, self.page, self.per_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+# --- Persistent VouchView ---
+class VouchView(discord_ticket.ui.View):
+    def __init__(self, staff_members, user_id):
+        super().__init__(timeout=None)
+        self.staff_members = staff_members
+        self.user_id = user_id
+        self.selected_staff_id = None
+        self.selected_rating = None
+        self.add_item(self.StaffSelect(staff_members, self))
+        self.add_item(self.StarSelect(self))
+        self.add_item(self.VouchButton(self))
+
+    class StaffSelect(discord_ticket.ui.Select):
+        def __init__(self, staff_members, parent_view):
+            options = [discord_ticket.SelectOption(label=member.display_name, value=str(member.id)) for member in staff_members]
+            super().__init__(placeholder="Select staff to vouch for", options=options, min_values=1, max_values=1, custom_id="vouch_staff_select")
+            self.parent_view = parent_view
+        async def callback(self, interaction: discord_ticket.Interaction):
+            self.parent_view.selected_staff_id = int(self.values[0])
+            await interaction.response.send_message(f"Selected staff: <@{self.values[0]}>", ephemeral=True)
+
+    class StarSelect(discord_ticket.ui.Select):
+        def __init__(self, parent_view):
+            options = [discord_ticket.SelectOption(label=f"{i} ⭐", value=str(i)) for i in range(1, 6)]
+            super().__init__(placeholder="Select rating (1-5 stars)", options=options, min_values=1, max_values=1, custom_id="vouch_star_select")
+            self.parent_view = parent_view
+        async def callback(self, interaction: discord_ticket.Interaction):
+            self.parent_view.selected_rating = int(self.values[0])
+            await interaction.response.send_message(f"Selected rating: {self.values[0]} ⭐", ephemeral=True)
+
+    class VouchButton(discord_ticket.ui.Button):
+        def __init__(self, parent_view):
+            super().__init__(label="Submit Vouch", style=discord_ticket.ButtonStyle.success, custom_id="vouch_submit")
+            self.parent_view = parent_view
+
+        async def callback(self, interaction: discord_ticket.Interaction):
+            if not self.parent_view.selected_staff_id or not self.parent_view.selected_rating:
+                await interaction.response.send_message("Please select a staff member and a rating before submitting.", ephemeral=True)
+                return
+            modal = VouchModal(
+                self.parent_view.selected_staff_id,
+                self.parent_view.user_id,
+                self.parent_view.selected_rating,
+                on_submit_callback=handle_vouch_submit
+            )
+            await interaction.response.send_modal(modal)
+
+# --- Persistent RatingView ---
+class RatingView(View_ticket):
+    def __init__(self, staff_id, ticket_channel, rater_id):
+        super().__init__(timeout=None)
+        for i in range(1, 6):
+            self.add_item(RatingButton(i, staff_id, ticket_channel, rater_id))
+
+# --- Persistent TicketBoardView ---
+class TicketBoardView(View_ticket):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketTypeSelect())
+
+# --- Persistent TicketTypeSelect ---
+class TicketTypeSelect(Select_ticket):
+    def __init__(self):
+        options = [
+            discord_ticket.SelectOption(label="ALS", description="Open a ticket for ALS Staff"),
+            discord_ticket.SelectOption(label="ASTDX", description="Open a ticket for ASTDX Staffs")
+        ]
+        super().__init__(placeholder="Ticket Selector", options=options, custom_id="ticket_type_select")
+    async def callback(self, interaction: discord_ticket.Interaction):
+        global ticket_counter
+        ticket_counter += 1
+        ticket_type = self.values[0].lower()
+        ticket_name = f"{ticket_type}-ticket-{ticket_counter:04}"
+        guild = interaction.guild
+        category = guild.get_channel(CATEGORY_ID)
+        helpers_role = guild.get_role(STAFF_ROLE_ID)
+        overwrites = {
+            guild.default_role: discord_ticket.PermissionOverwrite(read_messages=False),
+            interaction.user: discord_ticket.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, embed_links=True),
+            helpers_role: discord_ticket.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        ticket_channel = await guild.create_text_channel(ticket_name, overwrites=overwrites, category=category)
+        create_ticket(ticket_channel.id, interaction.user.id)
+        view = View_ticket()
+        view.add_item(TakeRequestButton(interaction.user.id))
+        view.add_item(DeleteTicketButton(interaction.user.id))
+        role_id = ALS_ROLE_ID if ticket_type == "als" else ASTDX_ROLE_ID
+        staff_role = guild.get_role(role_id)
+        # Help/instructions message for ticket creators (as an embed)
+        help_embed = discord_ticket.Embed(
+            title="Ticket Help & Tips",
+            description=(
+                "• **Done? Drop a rating!** Once your issue's sorted, hit **DELETE TICKET** — that'll close it and let you rate the staff. A 5-star makes their day.\n\n"
+                "• **Be specific:** It's best for you to tell a specific number of runs (example: I want to do 5 dungeons) or something like that.\n\n"
+                "• **Hang tight:** If no one replies right away, don't worry. Our team's probably helping someone else. You're not being ignored.\n\n"
+                "• **Ignorances:** No one takes your request? Maybe because it's too hard or time-wasting, try to change!\n\n"
+                "• **Be cool:** Treat staff with respect, and they'll do their best to help. If someone's being rude, let us know.\n\n"
+                "• **After you're done:** Use the **dio!vouch** command to vouch for the staff!"
+            ),
+            color=discord_ticket.Color.blurple()
+        )
+        await ticket_channel.send(embed=help_embed)
+        await ticket_channel.send(f"{interaction.user.mention} has opened a **{ticket_type.upper()}** support ticket!\n{staff_role.mention if staff_role else ''}", view=view)
+        await interaction.response.send_message(f"\u2705 Your ticket has been created: {ticket_channel.mention}", ephemeral=True)
+        self.view.clear_items()
+        self.view.add_item(TicketTypeSelect())
+        await interaction.message.edit(view=self.view)
+
+# --- Register all persistent views in on_ready ---
+@bot_ticket.event
+async def on_ready():
+    print(f"bot_ticket is online! Username: {bot_ticket.user} (ID: {bot_ticket.user.id})")
+    bot_ticket.add_view(PersistentTicketView())
+    bot_ticket.add_view(TicketBoardView())
+    bot_ticket.add_view(VouchView([], 0))
+    bot_ticket.add_view(VouchPaginationView(None))
+    # Add more as needed
+
+@bot_ticket.command()
+async def ticketboard(ctx):
+    view = TicketBoardView()
+    await ctx.send("\ud83c\udfab Select a ticket type below:", view=view)
+
+@bot_ticket.command()
+async def staffratings(ctx):
+    if not get_staff_ratings(ctx.author.id):
+        await ctx.send("No ratings yet.")
+        return
+    embed = discord_ticket.Embed(title="\u2b50 Staff Ratings", color=discord_ticket.Color.green())
+    for staff_id, ratings in get_staff_ratings(ctx.author.id):
+        user = await bot_ticket.fetch_user(staff_id)
+        avg = sum(ratings) / len(ratings)
+        embed.add_field(name=f"{user}", value=f"{len(ratings)} ratings | Avg: {avg:.2f}\u2b50", inline=False)
+    await ctx.send(embed=embed)
 
 def run_ticket_bot():
     try:
@@ -1247,3 +1513,7 @@ if __name__ == "__main__":
         print("\n🛑 Shutting down bots...")
         print("Bots will disconnect automatically")
         sys.exit(0)
+
+@bot_ticket.event
+async def on_message(message):
+    await bot_ticket.process_commands(message)
