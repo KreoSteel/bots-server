@@ -1297,6 +1297,11 @@ guild_id = None  # Set your server's guild ID here for faster slash command regi
 # Add a global variable to track the current song info
 current_song = {}
 
+# Add rate limiting for YouTube requests
+import time
+last_youtube_request = 0
+YOUTUBE_RATE_LIMIT = 2  # Minimum seconds between requests
+
 @bot_music.event
 async def on_ready():
     print(f'Music Bot logged in as {bot_music.user}')
@@ -1342,40 +1347,87 @@ async def music_play(ctx, *, query: str):
                 await ctx.send(f'❌ Could not move to voice channel: {e}')
                 return
 
+    # Rate limiting
+    global last_youtube_request
+    current_time = time.time()
+    if current_time - last_youtube_request < YOUTUBE_RATE_LIMIT:
+        await asyncio.sleep(YOUTUBE_RATE_LIMIT - (current_time - last_youtube_request))
+    last_youtube_request = time.time()
+    
     await ctx.send(f'🔍 Searching for: {query}')
 
-    # Always search YouTube with the user query
+    # Try multiple search strategies
+    search_strategies = [
+        query,  # Original query
+        f'"{query}"',  # Quoted query
+        query + ' official',  # Add "official" to search
+        query + ' music'  # Add "music" to search
+    ]
+    
     search_opts = {
         'format': 'bestaudio/best',
         'noplaylist': True,
         'default_search': 'ytsearch',
         'quiet': True,
         'extract_flat': 'True',
+        'no_warnings': True,
+        'ignoreerrors': True,
+        'no_check_certificate': True,
+        'prefer_insecure': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
     }
-    print(f"yt_query passed to yt-dlp: {query}")
-    with yt_dlp.YoutubeDL(search_opts) as ydl:
-        try:
-            info = ydl.extract_info(query, download=False)
-            if 'entries' in info:
-                info = info['entries'][0]
-            video_url = info['url'] if 'url' in info else info['webpage_url']
-            title = info.get('title', 'Unknown Title')
-            webpage_url = info.get('webpage_url', video_url)
-            thumbnail = info.get('thumbnail', None)
-        except Exception as e:
-            await ctx.send(f'❌ Could not find or play "{query}": {e}')
-            return
+    
+    info = None
+    last_error = None
+    
+    for search_query in search_strategies:
+        print(f"Trying search: {search_query}")
+        with yt_dlp.YoutubeDL(search_opts) as ydl:
+            try:
+                info = ydl.extract_info(search_query, download=False)
+                if 'entries' in info:
+                    info = info['entries'][0]
+                video_url = info['url'] if 'url' in info else info['webpage_url']
+                title = info.get('title', 'Unknown Title')
+                webpage_url = info.get('webpage_url', video_url)
+                thumbnail = info.get('thumbnail', None)
+                break  # Success, exit the loop
+            except Exception as e:
+                last_error = e
+                await asyncio.sleep(0.5)  # Small delay between attempts
+                continue  # Try next strategy
+    
+    if info is None:
+        error_msg = str(last_error)
+        if "Sign in to confirm you're not a bot" in error_msg:
+            await ctx.send(f'❌ YouTube is temporarily blocking automated access.\n\n**Solutions:**\n• Wait a few minutes and try again\n• Try a different search term\n• Use a YouTube link instead of search terms\n• Contact server staff if the issue persists')
+        else:
+            await ctx.send(f'❌ Could not find or play "{query}": {last_error}')
+        return
 
     audio_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
+        'no_warnings': True,
+        'ignoreerrors': True,
+        'no_check_certificate': True,
+        'prefer_insecure': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
     }
     with yt_dlp.YoutubeDL(audio_opts) as ydl:
         try:
             audio_info = ydl.extract_info(video_url, download=False)
             audio_url = audio_info['url']
         except Exception as e:
-            await ctx.send(f'❌ Could not extract audio: {e}')
+            error_msg = str(e)
+            if "Sign in to confirm you're not a bot" in error_msg:
+                await ctx.send(f'❌ YouTube is temporarily blocking audio extraction.\n\n**Solutions:**\n• Wait a few minutes and try again\n• Try a different song\n• Use a YouTube link instead of search terms')
+            else:
+                await ctx.send(f'❌ Could not extract audio: {e}')
             return
 
     ffmpeg_options = {
